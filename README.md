@@ -1,271 +1,279 @@
-# RL4RS: A Real-World Dataset for Reinforcement Learning based Recommender System
-<!-- [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) -->
+# RL4RS-PAV
+
+**Process Advantage Verifiers (PAV)** — 面向 RL4RS 离线推荐场景的 process-level credit assignment 与 reward shaping 框架。
+
+本项目基于 [RL4RS](https://github.com/fuxiAIlab/RL4RS) 公开代码与 MDP 建模，在不修改环境的前提下，为 offline RL 提供**被验证过的过程贡献信号**，缓解 delayed reward 带来的 credit assignment 困难。
 
 [![License](https://licensebuttons.net/l/by/3.0/88x31.png)](https://creativecommons.org/licenses/by/4.0/)
 
-RL4RS is a real-world deep reinforcement learning recommender system dataset for practitioners and researchers.
+---
 
-```py
-import gym
-from rl4rs.env.slate import SlateRecEnv, SlateState
+## 动机：RL4RS 的 credit assignment 问题
 
-sim = SlateRecEnv(config, state_cls=SlateState)
-env = gym.make('SlateRecEnv-v0', recsim=sim)
-for i in range(epoch):
-    obs = env.reset()
-    for j in range(config["max_steps"]):
-        action = env.offline_action
-        next_obs, reward, done, info = env.step(action)
-        if done[0]:
-            break
-```
-Dataset Download(data only): https://zenodo.org/record/6622390#.YqBBpRNBxQK
+在 RL4RS 中，单个 item 推荐动作的影响往往要等到 **slate 完成**或 **page 结束**才体现在 reward 上。原始离线数据里，前面多步 reward 为 0，最终一步才出现聚合收益。
 
-Dataset Download(for reproduction): https://drive.google.com/file/d/1YbPtPyYrMvMGOuqD4oHvK0epDtEhEb9v/view?usp=sharing
+这带来两个问题：
 
-Paper: https://arxiv.org/pdf/2110.11073.pdf
+1. **状态质量 vs 动作贡献混淆**：一个本来就很「有希望」的状态，会让任意动作看起来都不错。
+2. **虚假局部进步**：某些动作可能短期提升状态潜力，但最终偏离用户真实意图。
 
-<!--Paper_latest: https://openreview.net/pdf?id=euli0I5CKvy-->
+PAV 的目标是把这两个问题拆开，并只把**可靠的动作增量**注入 offline RL 训练。
 
-Appendix: https://github.com/fuxiAIlab/RL4RS/blob/main/RL4RS_appendix.pdf
+---
 
-Kaggle Competition (old version): https://www.kaggle.com/c/bigdata2021-rl-recsys/overview
+## 核心思想
 
-Resource Page: https://fuxi-up-research.gitbook.io/fuxi-up-challenges/
+PAV 使用**两个网络 + 一个非网络量**，职责明确分离：
 
-Tutorial: https://github.com/fuxiAIlab/RL4RS/blob/main/tutorial.ipynb
+| 组件 | 符号 | 输入 | 估计对象 |
+|------|------|------|----------|
+| Reward Model | $R_\phi(s)$ | 状态 $s$ | 状态潜力 $\mathbb{E}[G_t \mid s_t]$ |
+| Progress（非网络） | $p_t^k$ | 由 $R_\phi$ 与轨迹计算 | 动作的 k 步局部进步 |
+| Verifier | $V_\psi(s,a)$ | 状态 + 动作 | 局部进步是否可靠 $P(Z_t{=}1 \mid s,a)$ |
 
-## RL4RS News
-![new](/assets/new.gif) **04/20/2023**: SIGIR 2023 Resource Track, [Accept].
+**关键约束**：$R_\phi$ 不输入动作，因此不是 $Q(s,a)$；$V_\psi$ 预测的是 progress 可靠性，也不是最终成功概率。
 
-**09/02/2022**: We release RL4RS [v1.1.0](https://github.com/fuxiAIlab/RL4RS/releases/tag/v1.1.0). 1) two additional RS datasets for comparison, Last.fm and CIKMCup2016; 2) two additional model-free baselines, TD3 and RAINBOW, and two additional model-based batch RL baselines, MOPO (Model-based Offline Policy Optimization) and COMBO(Conservative Offline Model-Based Policy Optimization). 3) BCQ and CQL support continuous action spaces. 
-
-<!--**08/28/2022**: NeurIPS 2022 Track Datasets and Benchmarks, [Under Review](https://openreview.net/forum?id=euli0I5CKvy).-->
-
-**09/17/2022**: A hand-on Invited talk at [DRL4IR Workshop](https://drl4ir.github.io/), SIGIR2022.
-
-**12/17/2021**: Hosting [IEEE BigData2021 Cup Challenges](http://bigdataieee.org/BigData2021/BigDataCupChallenges.html), [Track I](https://www.kaggle.com/c/bigdata2021-rl-recsys/overview) for Supervised Learning and [Track II](https://fuxi-up-research.gitbook.io/fuxi-up-challenges/challenge/bigdatacup2021-rl4rs-challenge) for Reinforcement Learning.
-
-
-## key features
-
-### :star: Real-World Datasets
-- **two real-world datasets**: Besides the artificial datasets or semi-simulated datasets, RL4RS collects the raw logged data from one of the most popular games released by NetEase Game, which is naturally a sequential decision-making problem.
-- **data understanding tool**: RL4RS provides a data understanding tool for testing the proper use of RL on recommendation system datasets.
-- **advanced dataset setting**: RL4RS provides the separated data before and after reinforcement learning deployment for each dataset, which can simulate the difficulties to train a good RL policy from the dataset collected by SL-based algorithm.
-
-### :zap: Practical RL Baselines
-- **model-free RL**: RL4RS supports state-of-the-art RL libraries, such as RLlib and Tianshou. We provide the example codes of state-of-the-art model-free algorithms (A2C, PPO, etc.) implemented by RLlib library on both discrete and continue (combining policy gradients with a K-NN search) RL4RS environment.
-- **offline RL**: RL4RS implements offline RL algorithms including BC, BCQ and CQL through d3rlpy library. RL4RS is also the first to report the effectiveness of offline RL algorithms (BCQ and CQL) in RL-based RS domain.
-- **RL-based RS baselines**: RL4RS implements some algorithms proposed in the RL-based RS domain, including Exact-k and Adversarial User Model.
-- **offline RL evaluation**: In addition to the reward indicator and traditional RL evaluation setting (train and test on the same environment), RL4RS try to provide a complete evaluation framework by placing more emphasis on counterfactual policy evaluation.
-
-### :beginner: Easy-To-Use scaleable API
-- **low coupling structure**: RL4RS specifies a fixed data format to reduce code coupling. And the data-related logics are unified into data preprocessing scripts or user-defined state classes.
-- **file-based RL environment**: RL4RS implements a file-based gym environment, which enables random sampling and sequential access to datasets exceeding memory size. It is easy to extend it to distributed file systems.
-- **http-based vector Env**: RL4RS naturally supports Vector Env, that is, the environment processes batch data at one time. We further encapsulate the env through the HTTP interface, so that it can be deployed on multiple servers to accelerate the generation of samples.
-       
-## experimental features (welcome contributions!)
-- A new dataset for bundle recommendation with variable discounts, flexible recommendation trigger, and modifiable item content is in prepare.
-- Take raw feature rather than hidden layer embedding as observation input for offline RL
-- Model-based RL Algorithms 
-- Reward-oriented simulation environment construction
-- reproduce more algorithms (RL models, safe exploration techniques, etc.) proposed in RL-based RS domain
-- Support Parametric-Action DQN, in which we input concatenated state-action pairs and output the Q-value for each pair.
-
-                                     
-
-## installation
-RL4RS supports Linux, at least 64 GB Mem !!
-
-### Github (recommended)
-```
-$ git clone https://github.com/fuxiAIlab/RL4RS
-$ export PYTHONPATH=$PYTHONPATH:`pwd`/rl4rs
-$ conda env create -f environment.yml
-$ conda activate rl4rs
-```
-
-### Dataset Download (Google Driver) 
-Dataset Download: https://drive.google.com/file/d/1YbPtPyYrMvMGOuqD4oHvK0epDtEhEb9v/view?usp=sharing
+### 方法流程
 
 ```
-.
-|-- batchrl
-|   |-- BCQ_SeqSlateRecEnv-v0_b_all.h5
-|   |-- BCQ_SlateRecEnv-v0_a_all.h5
-|   |-- BC_SeqSlateRecEnv-v0_b_all.h5
-|   |-- BC_SlateRecEnv-v0_a_all.h5
-|   |-- CQL_SeqSlateRecEnv-v0_b_all.h5
-|   `-- CQL_SlateRecEnv-v0_a_all.h5
-|-- data_understanding_tool
-|   |-- dataset
-|   |   |-- ml-25m.zip
-|   |   `-- yoochoose-clicks.dat.zip
-|   `-- finetuned
-|       |-- movielens.csv
-|       |-- movielens.h5
-|       |-- recsys15.csv
-|       |-- recsys15.h5
-|       |-- rl4rs.csv
-|       `-- rl4rs.h5
-|-- exactk
-|   |-- exact_k.ckpt.10000.data-00000-of-00001
-|   |-- exact_k.ckpt.10000.index
-|   `-- exact_k.ckpt.10000.meta
-|-- ope
-|   `-- logged_policy.h5
-|-- raw_data
-|   |-- item_info.csv
-|   |-- rl4rs_dataset_a_rl.csv
-|   |-- rl4rs_dataset_a_sl.csv
-|   |-- rl4rs_dataset_b_rl.csv
-|   `-- rl4rs_dataset_b_sl.csv
-`-- simulator
-    |-- finetuned
-    |   |-- simulator_a_dien
-    |   |   |-- checkpoint
-    |   |   |-- model.data-00000-of-00001
-    |   |   |-- model.index
-    |   |   `-- model.meta
-    |   `-- simulator_b2_dien
-    |       |-- checkpoint
-    |       |-- model.data-00000-of-00001
-    |       |-- model.index
-    |       `-- model.meta
-    |-- rl4rs_dataset_a_shuf.csv
-    `-- rl4rs_dataset_b3_shuf.csv
+离线 MDPDataset
+    │
+    ├─► 训练 R_φ(s)     目标：MSE(R_φ, G_t)
+    │
+    ├─► 计算 p_t^k      非网络：k-step reward + 状态潜力差
+    │
+    ├─► 生成标签 Z_t    outcome consistency（同 step baseline 比较）
+    │
+    ├─► 训练 V_ψ(s,a)   目标：BCE(V_ψ, Z_t)
+    │
+    ├─► C_t = p_t^k × V_ψ(s,a)    verified contribution
+    │
+    └─► r'_t = r_t + α · clip(norm(C_t))    shaped reward
+            → 导出新的 MDPDataset → CQL / BCQ / BC 训练
 ```
 
-## two ways to use this resource
-### Reinforcement Learning Only 
+### 核心公式
+
+**k-step Progress**（$K_t = \min(k, H-t)$）：
+
+$$p_t^k = \sum_{i=0}^{K_t-1}\gamma^i r_{t+i} + \mathbf{1}[K_t{=}k]\,\gamma^k R_\phi(s_{t+k}) - R_\phi(s_t)$$
+
+**Verifier 标签**（第一版 outcome consistency）：
+
+$$Z_t = \mathbf{1}\big[\operatorname{sign}(p_t^k - b_p(t)) = \operatorname{sign}(G_t - \bar G(t))\big]$$
+
+**Verified Contribution & Shaped Reward**：
+
+$$C_t = p_t^k \cdot V_\psi(s_t, a_t), \qquad r'_t = r_t + \alpha \cdot \operatorname{clip}(\operatorname{norm}(C_t),\,-c,\,c)$$
+
+默认超参：$\alpha{=}0.1$，$c{=}3$，$k{=}3$（`SlateRecEnv-v0`）/ $k{=}5$（`SeqSlateRecEnv-v0`）。
+
+更完整的理论定义见 [`docs/pav/`](docs/pav/)。
+
+---
+
+## 项目结构
+
 ```
-# move simulator/*.csv to rl4rs/dataset
-# move simulator/finetuned/* to rl4rs/output
-cd reproductions/
-# run exact-k
-bash run_exact_k.sh
-# start http-based Env, then run RLlib library
-nohup python -u rl4rs/server/gymHttpServer.py &
-bash run_modelfree_rl.sh DQN/PPO/DDPG/PG/PG_conti/etc.
+RL4RS-main/
+├── rl4rs/
+│   ├── env/              # RL4RS 环境（SlateRecEnv / SeqSlateRecEnv）
+│   ├── nets/             # 仿真器与 offline RL 网络
+│   └── pav/              # ★ PAV 核心实现
+│       ├── config.py     # 超参与路径配置
+│       ├── dataset.py    # MDPDataset 展开与导出
+│       ├── models.py     # RewardModel / Verifier
+│       ├── progress.py   # p_t^k, Z_t, reward shaping
+│       ├── trainer.py    # 训练与信号编排
+│       └── pipeline.py   # 对外入口 build_pav_dataset()
+├── script/
+│   ├── pav_train.py      # PAV 命令行入口
+│   └── batchrl_train.py  # offline RL 训练（支持 use_pav）
+├── reproductions/
+│   └── run_pav.sh        # 端到端复现脚本
+└── docs/pav/             # MDP 建模、PAV 定义、实验协议
 ```
 
-### start from scratch (batch-rl, environment simulation, etc.)
-```
-cd reproductions/
-# first step, generate tfrecords for supervised learning (environment simulation) 
-# is time-consuming, you can annotate them firstly.
-bash run_split.sh
+**PAV 接入点**：在 `MDPDataset` 生成之后、offline RL 训练之前，不侵入 `rl4rs/env/`。
 
-# environment simulation part (need tfrecord)
-# run these scripts to compare different SL methods
-bash run_supervised_item.sh dnn/widedeep/dien/lstm
-bash run_supervised_slate.sh dnn_slate/adversarial_slate/etc.
-# or you can directly train DIEN-based simulator as RL Env.
-bash run_simulator_train.sh dien
+---
 
-# model-free part (need run_simulator_train.sh)
-# run exact-k
-bash run_exact_k.sh
-# start http-based Env, then run RLlib library
-nohup python -u rl4rs/server/gymHttpServer.py &
-bash run_modelfree_rl.sh DQN/PPO/DDPG/PG/PG_conti/etc.
+## 环境要求
 
-# offline RL part (need run_simulator_train.sh)
-# generate offline dataset for offline RL first (dataset_generate stage)
-# generate offline dataset for offline RL first (train stage)
-bash run_batch_rl.sh BC/BCQ/CQL
-```
+- Linux（推荐）或 Windows
+- Python 3.6+，Conda
+- 至少 64 GB 内存（RL4RS 原始要求）
+- GPU（训练 Reward Model / Verifier / CQL 时推荐）
 
-## reported baselines 
-| algorithm  | category | support mode |
-|:-|:-:|:-:|
-| [Wide&Deep](https://dl.acm.org/doi/pdf/10.1145/2988450.2988454) | supervised learning | item-wise classification/slate-wise classification/item ranking |
-| [GRU4Rec](https://arxiv.org/pdf/1511.06939) | supervised learning | item-wise classification/slate-wise classification/item ranking |
-| [DIEN](https://www.researchgate.net/profile/Xiaoqiang-Zhu-7/publication/327591686_Deep_Interest_Evolution_Network_for_Click-Through_Rate_Prediction/links/5bc0398f458515a7a9e2a6db/Deep-Interest-Evolution-Network-for-Click-Through-Rate-Prediction.pdf) | supervised learning | item-wise classification/slate-wise classification/item ranking |
-| [Adversarial User Model](http://proceedings.mlr.press/v97/chen19f/chen19f.pdf) | supervised learning | item-wise classification/slate-wise classification/item ranking |
-| [Exact-K](https://arxiv.org/pdf/1905.07089.pdf) | model-free learning | discrete env & hidden state as observation |
-| [Policy Gredient (PG)](https://proceedings.neurips.cc/paper/1999/file/464d828b85b0bed98e80ade0a5c43b0f-Paper.pdf) | model-free RL | model-free learning | discrete/conti env & raw feature/hidden state as observation |
-| [Deep Q-Network (DQN)](https://www.nature.com/articles/nature14236) | model-free RL | discrete env & raw feature/hidden state as observation |
-| [Deep Deterministic Policy Gradients (DDPG)](https://arxiv.org/abs/1509.02971) | model-free RL | conti env & raw feature/hidden state as observation |
-| [Asynchronous Actor-Critic (A2C)](http://proceedings.mlr.press/v48/mniha16.pdf) | model-free RL | discrete/conti env & raw feature/hidden state as observation |
-| [Proximal Policy Optimization (PPO)](https://arxiv.org/pdf/1707.06347.pdf) | model-free RL | discrete/conti env & raw feature/hidden state as observation |
-| Behavior Cloning | supervised learning/Offline RL | discrete env & hidden state as observation |
-| [Batch Constrained Q-learning (BCQ)](https://arxiv.org/abs/1812.02900) | Offline RL | discrete env & hidden state as observation |
-| [Conservative Q-Learning (CQL)](https://arxiv.org/abs/2006.04779) | Offline RL | discrete env & hidden state as observation |
+---
 
-## supported algorithms (from RLlib and d3rlpy)
-| algorithm | discrete control | continuous control | offline RL? |
-|:-|:-:|:-:|:-:|
-| Behavior Cloning (supervised learning) | :white_check_mark: | :white_check_mark: | |
-| [Deep Q-Network (DQN)](https://www.nature.com/articles/nature14236) | :white_check_mark: | :no_entry: | |
-| [Double DQN](https://arxiv.org/abs/1509.06461) | :white_check_mark: | :no_entry: | |
-| [Rainbow](https://www.aaai.org/ocs/index.php/AAAI/AAAI18/paper/viewFile/17204/16680) | :white_check_mark: | :no_entry: | |
-| [PPO](https://arxiv.org/pdf/1707.06347.pdf) | :white_check_mark: | :white_check_mark: | |
-| [A2C A3C](http://proceedings.mlr.press/v48/mniha16.pdf) | :white_check_mark: | :white_check_mark: | |
-| [IMPALA](https://arxiv.org/pdf/1802.01561.pdf) | :white_check_mark: | :white_check_mark: | |
-| [Deep Deterministic Policy Gradients (DDPG)](https://arxiv.org/abs/1509.02971) | :no_entry: | :white_check_mark: | |
-| [Twin Delayed Deep Deterministic Policy Gradients (TD3)](https://arxiv.org/abs/1802.09477) | :no_entry: | :white_check_mark: | |
-| [Soft Actor-Critic (SAC)](https://arxiv.org/abs/1812.05905) | :white_check_mark: | :white_check_mark: | |
-| [Batch Constrained Q-learning (BCQ)](https://arxiv.org/abs/1812.02900) | :white_check_mark: | :white_check_mark: | :white_check_mark: |
-| [Bootstrapping Error Accumulation Reduction (BEAR)](https://arxiv.org/abs/1906.00949) | :no_entry: | :white_check_mark: | :white_check_mark: |
-| [Advantage-Weighted Regression (AWR)](https://arxiv.org/abs/1910.00177) | :white_check_mark: | :white_check_mark: | :white_check_mark: |
-| [Conservative Q-Learning (CQL)](https://arxiv.org/abs/2006.04779) | :white_check_mark: | :white_check_mark: | :white_check_mark: |
-| [Advantage Weighted Actor-Critic (AWAC)](https://arxiv.org/abs/2006.09359) | :no_entry: | :white_check_mark: | :white_check_mark: |
-| [Critic Reguralized Regression (CRR)](https://arxiv.org/abs/2006.15134) | :no_entry: | :white_check_mark: | :white_check_mark: |
-| [Policy in Latent Action Space (PLAS)](https://arxiv.org/abs/2011.07213) | :no_entry: | :white_check_mark: | :white_check_mark: |
-| [TD3+BC](https://arxiv.org/abs/2106.06860) | :no_entry: | :white_check_mark: | :white_check_mark: |
+## 安装
 
-
-## examples
-See script/ and reproductions/.
-
-RLlib examples: https://docs.ray.io/en/latest/rllib-examples.html
-
-d3rlpy examples: https://d3rlpy.readthedocs.io/en/v1.0.0/
-
-## reproductions
-See reproductions/.
 ```bash
-bash run_xx.sh ${param}
+git clone https://github.com/Yukari14/RL4RS-PAV.git
+cd RL4RS-PAV
+export PYTHONPATH=$PYTHONPATH:$(pwd)
+conda env create -f environment.yml
+conda activate rl4rs
 ```
-| experiment in the paper  | shell script | optional param. | description | 
-|:-|:-:|:-:|:-:|
-| Sec.3 | run_split.sh  | - | dataset split/shuffle/align(for datasetB)/to tfrecord |
-| Sec.4 | run_mdp_checker.sh | recsys15/movielens/rl4rs | unzip ml-25m.zip and yoochoose-clicks.dat.zip into dataset/ |
-| Sec.5.1 | run_supervised_item.sh | dnn/widedeep/lstm/dien | Table 5. Item-wise classification |
-| Sec.5.1 | run_supervised_slate.sh | dnn_slate/widedeep_slate/lstm_slate/dien_slate/adversarial_slate | Table 5. Item-wise rank |
-| Sec.5.1 | run_supervised_slate.sh | dnn_slate_multiclass/widedeep_slate_multiclass/lstm_slate_multiclass/dien_slate_multiclass | Table 5. Slate-wise classification |
-| Sec.5.1 & Sec.6 | run_simulator_train.sh | dien | dien-based simulator for different trainsets |
-| Sec.5.1 & Sec.6 | run_simulator_eval.sh | dien | Table 6. |
-| Sec.5.1 & Sec.6 | run_modelfree_rl.sh | PG/DQN/A2C/PPO/IMPALA/DDPG/*_conti | Table 7. |
-| Sec.5.2 & Sec.6 | run_batch_rl.sh | BC/BCQ/CQL | Table 8. |
-| Sec.5.1 | run_exact_k.sh | - | Exact-k |
-| - | run_simulator_env_test.sh | - | examining the consistency of features (observations) between RL env and supervised simulator |
 
+### 数据集下载
 
-## contributions
-Any kind of contribution to RL4RS would be highly appreciated!
-Please contact us by email.
+本仓库**不包含**大型数据文件（`dataset/*.csv`、`dataset/*.h5` 已在 `.gitignore` 中排除）。请从 RL4RS 官方渠道下载后放到 `dataset/` 目录：
 
-## community
-| Channel | Link |
-|:-|:-|
-| Materials | [Google Drive](https://drive.google.com/file/d/1YbPtPyYrMvMGOuqD4oHvK0epDtEhEb9v/view?usp=sharing) |
-| Email | [Mail](asdqsczser@gmail.com) |
-| Issues | [GitHub Issues](https://github.com/fuxiAIlab/RL4RS/issues) |
-| Fuxi Team | [Fuxi HomePage](https://fuxi.163.com/en/) |
-| Our Team | [Open-project](https://fuxi-up-research.gitbook.io/open-project/) |
+| 资源 | 链接 |
+|------|------|
+| 数据（仅数据） | https://zenodo.org/record/6622390 |
+| 完整复现包 | https://drive.google.com/file/d/1YbPtPyYrMvMGOuqD4oHvK0epDtEhEb9v/view |
 
-## citation
+至少需要：
+
+- `dataset/item_info.csv`（已随仓库提供）
+- `dataset/rl4rs_dataset_a_shuf.csv`（`SlateRecEnv-v0`）
+- `dataset/rl4rs_dataset_b3_shuf.csv`（`SeqSlateRecEnv-v0`）
+- `output/simulator_a_dien/model`（仿真器，需先训练或从复现包获取）
+
+---
+
+## 快速开始
+
+### 1. 仅运行 PAV reward shaping
+
+```bash
+export rl4rs_dataset_dir=../dataset
+export rl4rs_output_dir=../output
+
+cd script
+python pav_train.py shape_dataset "{'env':'SlateRecEnv-v0','trial_name':'a_all'}"
 ```
+
+输出：
+
+- `dataset/SlateRecEnv-v0_a_all_pav.h5` — shaped 离线数据集
+- `output/pav/Reward_*.pt` — Reward Model 权重
+- `output/pav/Verifier_*.pt` — Verifier 权重
+- `output/pav/stats_*.json` — 训练统计
+
+### 2. 生成诊断报告
+
+```bash
+python pav_train.py diagnostics "{'env':'SlateRecEnv-v0','trial_name':'a_all'}"
+```
+
+### 3. 端到端：PAV + Offline RL
+
+```bash
+cd reproductions
+bash run_pav.sh CQL SlateRecEnv-v0 a_all
+```
+
+流程：`dataset_generate` → `PAV shape` → `PAV diagnostics` → `CQL train` → `eval` → `OPE`
+
+训练时通过 `use_pav=True` 自动加载 shaped 数据集：
+
+```python
+python batchrl_train.py CQL train "{'env':'SlateRecEnv-v0','trial_name':'a_all','use_pav':True}"
+```
+
+### 4. Python API
+
+```python
+from rl4rs.pav import PAVConfig, build_pav_dataset
+
+config = PAVConfig.from_dict({
+    "env": "SlateRecEnv-v0",
+    "trial_name": "a_all",
+    "alpha": 0.1,
+    "k": 3,
+})
+shaped_path, stats = build_pav_dataset(config)
+```
+
+---
+
+## 实验对比
+
+主实验对比 **Offline RL（原始 reward）** vs **Offline RL + PAV（shaped reward）**：
+
+| 算法 | 原始 | + PAV |
+|------|:----:|:-----:|
+| CQL | ✓ | ✓ |
+| BCQ | ✓ | ✓ |
+| BC | ✓ | ✓ |
+
+支持环境：
+
+- `SlateRecEnv-v0`（9-step slate，$H=9$）
+- `SeqSlateRecEnv-v0`（4-page sequential slate，$H=36$）
+
+详细协议见 [`docs/pav/03_experiment_protocol.md`](docs/pav/03_experiment_protocol.md)。
+
+---
+
+## 消融实验
+
+通过 `PAVConfig` 或 `pav_train.py` 的 `extra_config` 控制：
+
+| 配置项 | 默认值 | 消融用途 |
+|--------|--------|----------|
+| `use_verifier` | `True` | 关闭 Verifier，$C_t = p_t^k$ |
+| `use_raw_progress` | `False` | 直接用 progress，不乘 Verifier 分数 |
+| `reward_model_zero` | `False` | $R_\phi \equiv 0$，测试无状态潜力时的 progress |
+| `alpha` | `0.1` | shaping 强度（如 0.05 / 0.2） |
+| `k` | 3 或 5 | progress 视野长度 |
+
+```bash
+python pav_train.py shape_dataset "{'env':'SlateRecEnv-v0','use_verifier':False,'suffix':'pav_noverifier'}"
+python batchrl_train.py CQL train "{'env':'SlateRecEnv-v0','use_pav':True,'pav_suffix':'pav_noverifier'}"
+```
+
+---
+
+## 文档
+
+| 文档 | 内容 |
+|------|------|
+| [`01_rl4rs_mdp_formulation.md`](docs/pav/01_rl4rs_mdp_formulation.md) | RL4RS MDP 建模与符号对应 |
+| [`02_progress_and_pav_definition.md`](docs/pav/02_progress_and_pav_definition.md) | PAV 完整数学定义 |
+| [`03_experiment_protocol.md`](docs/pav/03_experiment_protocol.md) | 主实验与消融协议 |
+| [`04_two_month_roadmap.md`](docs/pav/04_two_month_roadmap.md) | 研究路线图 |
+
+---
+
+## 与上游 RL4RS 的关系
+
+本项目是 RL4RS 的**扩展 fork**，保留其全部环境与 baseline 能力：
+
+- **保留**：`SlateRecEnv-v0`、`SeqSlateRecEnv-v0`、仿真器训练、CQL/BCQ/BC 等 offline RL pipeline
+- **新增**：`rl4rs/pav/` 子包，在 MDPDataset 层做 verified progress shaping
+- **不修改**：环境 transition、原始 reward 计算、数据生成逻辑
+
+上游资源：
+
+- RL4RS 论文：https://arxiv.org/pdf/2110.11073.pdf
+- 原始仓库：https://github.com/fuxiAIlab/RL4RS
+- Tutorial：https://github.com/fuxiAIlab/RL4RS/blob/main/tutorial.ipynb
+
+---
+
+## Citation
+
+如果使用本仓库，请引用 RL4RS 原文：
+
+```bibtex
 @article{2021RL4RS,
-title={RL4RS: A Real-World Benchmark for Reinforcement Learning based Recommender System},
-author={ Kai Wang and Zhene Zou and Yue Shang and Qilin Deng and Minghao Zhao and Runze Wu and Xudong Shen and Tangjie Lyu and Changjie Fan},
-journal={ArXiv},
-year={2021},
-volume={abs/2110.11073}
+  title={RL4RS: A Real-World Benchmark for Reinforcement Learning based Recommender System},
+  author={Kai Wang and Zhene Zou and Yue Shang and Qilin Deng and Minghao Zhao and Runze Wu and Xudong Shen and Tangjie Lyu and Changjie Fan},
+  journal={ArXiv},
+  year={2021},
+  volume={abs/2110.11073}
 }
 ```
 
+PAV 方法论文投稿中，引用信息待更新。
 
+---
+
+## License
+
+本项目继承 RL4RS 的 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。
