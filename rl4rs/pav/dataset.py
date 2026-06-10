@@ -1,7 +1,12 @@
 import os
 
+import h5py
 import numpy as np
 from d3rlpy.dataset import MDPDataset
+try:
+    from d3rlpy.dataset import InfiniteBuffer
+except ImportError:
+    InfiniteBuffer = None
 
 
 def ensure_dir(path):
@@ -11,7 +16,27 @@ def ensure_dir(path):
 
 
 def load_mdpdataset(path):
-    return MDPDataset.load(path)
+    try:
+        return MDPDataset.load(path)
+    except TypeError:
+        # d3rlpy>=2 changed ReplayBuffer.load signature and cannot read
+        # legacy d3rlpy 0.x MDPDataset paths directly.
+        try:
+            with h5py.File(path, "r") as f:
+                observations = f["observations"][:]
+                actions = f["actions"][:]
+                rewards = f["rewards"][:]
+                terminals = f["terminals"][:]
+                discrete_action = bool(f["discrete_action"][()]) if "discrete_action" in f else True
+            kwargs = {}
+            if not discrete_action:
+                kwargs["action_space"] = None
+            return MDPDataset(observations, actions, rewards, terminals, **kwargs)
+        except (OSError, KeyError):
+            if InfiniteBuffer is None:
+                raise
+            with open(path, "rb") as f:
+                return MDPDataset.load(f, InfiniteBuffer())
 
 
 def _episode_terminals(episode, length):
@@ -93,17 +118,18 @@ def add_returns(flat, gamma):
 
 def export_mdpdataset(observations, actions, rewards, terminals, path, discrete_action=True):
     ensure_dir(path)
-    kwargs = {}
-    if not discrete_action:
-        kwargs["discrete_action"] = False
-    dataset = MDPDataset(
-        observations.astype("float32"),
-        actions,
-        rewards.astype("float32"),
-        terminals.astype("float32"),
-        **kwargs
-    )
-    dataset.dump(path)
+    actions = np.asarray(actions)
+    if discrete_action and actions.ndim == 2 and actions.shape[1] == 1:
+        actions = actions[:, 0]
+    with h5py.File(path, "w") as f:
+        f.create_dataset("observations", data=observations.astype("float32"))
+        f.create_dataset("actions", data=actions.astype("int32") if discrete_action else actions.astype("float32"))
+        f.create_dataset("rewards", data=rewards.astype("float32"))
+        f.create_dataset("terminals", data=terminals.astype("float32"))
+        f.create_dataset("episode_terminals", data=terminals.astype("float32"))
+        f.create_dataset("discrete_action", data=bool(discrete_action))
+        f.create_dataset("create_mask", data=False)
+        f.create_dataset("mask_size", data=0)
     return path
 
 

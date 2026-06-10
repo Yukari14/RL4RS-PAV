@@ -79,16 +79,21 @@ RL4RS-main/
 ├── rl4rs/
 │   ├── env/              # RL4RS 环境（SlateRecEnv / SeqSlateRecEnv）
 │   ├── nets/             # 仿真器与 offline RL 网络
+│   ├── online/           # ★ 在线 RL 配置与环境工具
 │   └── pav/              # ★ PAV 核心实现
 │       ├── config.py     # 超参与路径配置
 │       ├── dataset.py    # MDPDataset 展开与导出
-│       ├── models.py     # RewardModel / Verifier
-│       ├── progress.py   # p_t^k, Z_t, reward shaping
-│       ├── trainer.py    # 训练与信号编排
+│       ├── models.py     # RewardModel / Verifier（含 embed head）
+│       ├── progress.py   # k-step / directional progress, necessity 标签
+│       ├── trainer.py    # 训练 + consistency fine-tune
+│       ├── online.py     # ★ 在线 PAVRewardWrapper（streaming v2）
 │       └── pipeline.py   # 对外入口 build_pav_dataset()
 ├── script/
 │   ├── pav_train.py      # PAV 命令行入口
-│   └── batchrl_train.py  # offline RL 训练（支持 use_pav）
+│   ├── batchrl_train.py  # offline RL 训练（支持 use_pav）
+│   ├── dqn_pav_pilot.py  # ★ RLlib DQN + 在线 PAV
+│   ├── ppo_pav_pilot.py  # ★ RLlib PPO（官方 modelfree 配置）+ PAV
+│   └── qlearning_train.py
 ├── reproductions/
 │   └── run_pav.sh        # 端到端复现脚本
 └── docs/pav/             # MDP 建模、PAV 定义、实验协议
@@ -188,6 +193,25 @@ config = PAVConfig.from_dict({
 })
 shaped_path, stats = build_pav_dataset(config)
 ```
+
+### 5. Online RL（PAV v2 + DQN/PPO）
+
+除离线 shaped H5 外，本仓库新增 **在线 streaming PAV**：每步用 k-step + directional progress，默认 **乘 Verifier 门控** \(C_t = p_t \cdot V_\psi(s,a)\)，eval 仍在 raw DIEN simulator 上测。
+
+```bash
+export rl4rs_output_dir=$PWD/output
+export rl4rs_dataset_dir=$PWD/dataset
+
+# 小 pilot：DQN raw vs PAV
+python script/dqn_pav_pilot.py --seed 0 --epochs 100
+python script/dqn_pav_pilot.py --use-pav --pav-suffix pav_v2 --seed 0 --epochs 100
+
+# 官方 modelfree 对齐：PPO raw vs PAV
+python script/ppo_pav_pilot.py --seed 0 --epochs 100
+python script/ppo_pav_pilot.py --use-pav --pav-suffix pav_v2 --seed 0 --epochs 100
+```
+
+模块：`rl4rs/pav/online.py`（`PAVRewardWrapper`）、`rl4rs/online/`（config/env）、`script/dqn_pav_pilot.py` / `script/ppo_pav_pilot.py`。详见 [`docs/pav/online_runbook.md`](docs/pav/online_runbook.md)。
 
 ---
 

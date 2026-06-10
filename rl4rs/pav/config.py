@@ -28,6 +28,13 @@ class PAVConfig:
     use_verifier: bool = True
     use_clipping: bool = True
     use_raw_progress: bool = False
+    verifier_label_mode: str = "sign"
+    verifier_margin_frac: float = 0.25
+    directional_lambda: float = 0.0
+    embed_dim: int = 64
+    consistency_beta: float = 0.0
+    consistency_epochs: int = 2
+    online_use_verifier: bool = True
     max_train_samples: int = None
     device: str = None
     dataset_dir: str = None

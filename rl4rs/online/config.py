@@ -40,7 +40,7 @@ def build_dqn_slate_config(output_dir, dataset_dir, batch_size=64, gpu=True):
     return cfg
 
 
-def default_pav_config(output_dir, dataset_dir, trial_name="a_50k_logged", suffix="pav", **overrides):
+def default_pav_config(output_dir, dataset_dir, trial_name="a_50k_logged", suffix="pav_v2", **overrides):
     from rl4rs.pav.config import PAVConfig
 
     payload = {
@@ -48,10 +48,11 @@ def default_pav_config(output_dir, dataset_dir, trial_name="a_50k_logged", suffi
         "trial_name": trial_name,
         "suffix": suffix,
         "alpha": 0.05,
-        "confidence_gating": True,
-        "max_shaping_ratio": 1.5,
-        "min_confidence": 0.2,
-        "shaping_abs_floor": 5.0,
+        "directional_lambda": 0.5,
+        "verifier_label_mode": "necessity_combined",
+        "consistency_beta": 0.1,
+        "use_verifier": True,
+        "use_raw_progress": False,
         "output_dir": output_dir,
         "dataset_dir": dataset_dir,
     }

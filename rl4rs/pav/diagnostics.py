@@ -91,8 +91,30 @@ def write_ablation_matrix(output_path):
                      "reward_model_zero": False, "use_verifier": True,
                      "use_raw_progress": False, "use_clipping": True})
 
+    v2_rows = [
+        {"ablation": "v2_directional", "directional_lambda": 0.5,
+         "verifier_label_mode": "sign", "consistency_beta": 0.0},
+        {"ablation": "v2_necessity", "directional_lambda": 0.0,
+         "verifier_label_mode": "necessity", "consistency_beta": 0.0},
+        {"ablation": "v2_full", "directional_lambda": 0.5,
+         "verifier_label_mode": "necessity_combined", "consistency_beta": 0.1},
+    ]
+    for row in v2_rows:
+        row.setdefault("k", 3)
+        row.setdefault("alpha", 0.1)
+        row.setdefault("reward_model_zero", False)
+        row.setdefault("use_verifier", True)
+        row.setdefault("use_raw_progress", False)
+        row.setdefault("use_clipping", True)
+        rows.append(row)
+
     fieldnames = ["ablation", "k", "alpha", "reward_model_zero", "use_verifier",
-                  "use_raw_progress", "use_clipping"]
+                  "use_raw_progress", "use_clipping", "directional_lambda",
+                  "verifier_label_mode", "consistency_beta"]
+    for row in rows:
+        row.setdefault("directional_lambda", 0.0)
+        row.setdefault("verifier_label_mode", "sign")
+        row.setdefault("consistency_beta", 0.0)
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

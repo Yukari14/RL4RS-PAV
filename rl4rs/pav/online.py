@@ -7,14 +7,26 @@ import torch
 from rl4rs.online.env_utils import as_batch_list, batch_pav_obs_vectors_from_env, obs_vector
 from rl4rs.pav.config import PAVConfig
 from rl4rs.pav.models import load_reward_model, load_verifier
-from rl4rs.pav.progress import compute_k_step_progress
-from rl4rs.pav.trainer import predict_reward_values, predict_verifier_scores
+from rl4rs.pav.progress import (
+    combine_progress,
+    compute_directional_progress,
+    compute_k_step_progress,
+    normalize_by_step,
+)
+from rl4rs.pav.trainer import predict_reward_embeddings, predict_reward_values, predict_verifier_scores
 
 
 def _device(config):
     if config.device:
         return torch.device(config.device)
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+def _norm_stats_for_config(stats, config):
+    """Pick frozen normalization stats matching contribution definition."""
+    if config.use_raw_progress or not config.use_verifier:
+        return stats.get("progress_norm_by_step") or stats.get("norm_by_step", {})
+    return stats.get("norm_by_step", {})
 
 
 def normalize_with_frozen_stats(values, step_ids, norm_by_step, eps=1e-6):
@@ -40,71 +52,125 @@ def shape_rewards_frozen(
     alpha,
     clip_c,
     use_clipping,
-    alpha_scale=None,
 ):
     normalized = normalize_with_frozen_stats(contribution, step_ids, norm_by_step)
     if use_clipping:
         normalized = np.clip(normalized, -clip_c, clip_c)
     raw = np.asarray(raw_rewards, dtype=np.float32)
-    if alpha_scale is None:
-        shaped = raw + alpha * normalized.astype(np.float32)
-    else:
-        scale = np.asarray(alpha_scale, dtype=np.float32)
-        shaped = raw + alpha * scale * normalized.astype(np.float32)
+    shaped = raw + alpha * normalized.astype(np.float32)
     return shaped.astype(np.float32), normalized.astype(np.float32)
 
 
-def verifier_confidence_scores(verifier_scores):
-    """Map verifier prob in [0,1] to confidence in [0,1] (1 = most confident)."""
-    scores = np.asarray(verifier_scores, dtype=np.float32)
-    return np.abs(scores - 0.5) * 2.0
-
-
-def compute_alpha_scale(verifier_scores, config):
-    """Per-sample multiplier for alpha when confidence_gating is enabled."""
-    if not config.confidence_gating:
-        return None
-    confidence = verifier_confidence_scores(verifier_scores)
-    floor = float(config.min_confidence)
-    return np.maximum(confidence, floor).astype(np.float32)
-
-
-def cap_shaped_rewards(raw_rewards, shaped_rewards, config):
-    """Limit shaping term magnitude so it cannot dominate sparse raw rewards."""
-    ratio = float(config.max_shaping_ratio)
-    if ratio <= 0:
-        return shaped_rewards
-    raw = np.asarray(raw_rewards, dtype=np.float32)
-    shaped = np.asarray(shaped_rewards, dtype=np.float32)
-    floor = float(config.shaping_abs_floor)
-    max_delta = ratio * np.maximum(np.abs(raw), floor)
-    delta = shaped - raw
-    delta = np.clip(delta, -max_delta, max_delta)
-    return (raw + delta).astype(np.float32)
-
-
-def _transitions_to_flat(transitions):
-    observations = np.stack([obs_vector(t["obs"]) for t in transitions], axis=0).astype(np.float32)
-    actions = np.asarray([int(t["action"]) for t in transitions], dtype=np.int64)
-    rewards = np.asarray([float(t["raw_reward"]) for t in transitions], dtype=np.float32)
-    step_ids = np.arange(len(transitions), dtype=np.int64)
-    episode_ids = np.zeros(len(transitions), dtype=np.int64)
+def _flat_from_sequences(observations, actions, rewards):
+    observations = np.asarray(observations, dtype=np.float32)
+    actions = np.asarray(actions, dtype=np.int64)
+    rewards = np.asarray(rewards, dtype=np.float32)
+    length = len(rewards)
     return {
         "observations": observations,
         "actions": actions,
         "rewards": rewards,
-        "step_ids": step_ids,
-        "episode_ids": episode_ids,
+        "step_ids": np.arange(length, dtype=np.int64),
+        "episode_ids": np.zeros(length, dtype=np.int64),
     }
 
 
+def _transitions_to_flat(transitions):
+    return _flat_from_sequences(
+        [obs_vector(t["obs"]) for t in transitions],
+        [int(t["action"]) for t in transitions],
+        [float(t["raw_reward"]) for t in transitions],
+    )
+
+
+def _compute_progress_array(flat, artifacts):
+    config = artifacts["config"]
+    values = predict_reward_values(artifacts["reward_model"], flat["observations"], config)
+    potential = compute_k_step_progress(flat, values, config.k, config.gamma)
+    if float(config.directional_lambda) > 0.0:
+        embeddings = predict_reward_embeddings(
+            artifacts["reward_model"], flat["observations"], config
+        )
+        directional = compute_directional_progress(flat, embeddings, config.k)
+        return combine_progress(potential, directional, config.directional_lambda)
+    return potential
+
+
+def _contribution_array(flat, progress, artifacts):
+    config = artifacts["config"]
+    if config.use_raw_progress or not config.use_verifier or artifacts["verifier"] is None:
+        return np.asarray(progress, dtype=np.float32)
+    actions = np.clip(flat["actions"], 0, config.action_size - 1)
+    verifier_scores = predict_verifier_scores(
+        artifacts["verifier"], flat["observations"], actions, config
+    )
+    return np.asarray(progress, dtype=np.float32) * verifier_scores
+
+
+def compute_shaped_rewards_for_flat(flat, artifacts):
+    """Full v2 progress shaping for every step in flat."""
+    config = artifacts["config"]
+    stats = artifacts["stats"]
+    progress = _compute_progress_array(flat, artifacts)
+    contribution = _contribution_array(flat, progress, artifacts)
+    norm_by_step = _norm_stats_for_config(stats, config)
+    return shape_rewards_frozen(
+        flat["rewards"],
+        contribution,
+        flat["step_ids"],
+        norm_by_step,
+        alpha=config.alpha,
+        clip_c=config.clip_c,
+        use_clipping=config.use_clipping,
+    )[0]
+
+
+def _shape_latest_from_flat(flat, artifacts):
+    if len(flat["rewards"]) == 0:
+        return 0.0
+    shaped = compute_shaped_rewards_for_flat(flat, artifacts)
+    return float(shaped[-1])
+
+
+class _EpisodeBuffer(object):
+    def __init__(self):
+        self.observations = []
+        self.actions = []
+        self.rewards = []
+
+    def clear(self):
+        self.observations = []
+        self.actions = []
+        self.rewards = []
+
+    def append(self, observation, action, reward):
+        self.observations.append(np.asarray(observation, dtype=np.float32))
+        self.actions.append(int(action))
+        self.rewards.append(float(reward))
+
+    def to_flat(self):
+        if not self.rewards:
+            return None
+        return _flat_from_sequences(self.observations, self.actions, self.rewards)
+
+
 def fit_pav_models(dataset, config):
-    """Train reward/verifier checkpoints (offline fit). Returns build_pav_signals bundle."""
+    """Train PAV reward/verifier checkpoints."""
     from rl4rs.pav.trainer import build_pav_signals
 
     if isinstance(config, dict):
         config = PAVConfig.from_dict(config)
     return build_pav_signals(dataset, config)
+
+
+def _sync_online_config(config, stats):
+    """Apply checkpoint stats (k, alpha, directional_lambda, clip). Verifier gate from config/CLI."""
+    config.k = int(stats.get("k", config.k))
+    config.alpha = float(stats.get("alpha", config.alpha))
+    config.clip_c = float(stats.get("clip_c", config.clip_c))
+    config.directional_lambda = float(stats.get("directional_lambda", config.directional_lambda))
+    config.use_clipping = bool(stats.get("use_clipping", config.use_clipping))
+    return config
 
 
 def load_pav_artifacts(config_or_dict):
@@ -117,9 +183,11 @@ def load_pav_artifacts(config_or_dict):
     with open(config.stats_path, "r") as f:
         stats = json.load(f)
 
+    config = _sync_online_config(config, stats)
+
     reward_ckpt = torch.load(config.reward_model_path, map_location=device)
     reward_meta = reward_ckpt.get("metadata", {})
-    obs_dim = int(reward_meta.get("observation_dim", 256))
+    obs_dim = int(reward_meta.get("observation_dim", 266))
     hidden_units = reward_meta.get("hidden_units", config.hidden_units)
     reward_model, _ = load_reward_model(
         config.reward_model_path,
@@ -149,103 +217,51 @@ def load_pav_artifacts(config_or_dict):
     }
 
 
-def shape_latest_steps_batched(observations, actions, raw_rewards, step_ids, artifacts):
-    """Online Scheme C: batched shaped reward for the current step only.
-
-    When rewards are returned step-by-step during rollouts, the latest transition
-    always has horizon=min(k, 1)=1 in k-step progress, i.e. progress = raw - V(s).
-    This matches taking shaped[-1] from prefix replay but avoids O(t) recomputation.
-    """
+def shape_latest_steps_batched(observations, actions, raw_rewards, step_ids, artifacts, episode_buffers=None):
+    """Shaped reward for the latest step in a vector env (full v2 progress via episode prefix)."""
     config = artifacts["config"]
-    stats = artifacts["stats"]
-    obs = np.asarray(observations, dtype=np.float32)
     raw = np.asarray(raw_rewards, dtype=np.float32)
-    step_ids = np.asarray(step_ids, dtype=np.int64)
-    actions = np.asarray(actions, dtype=np.int64)
+    batch_size = len(raw)
+    shaped = np.zeros(batch_size, dtype=np.float32)
 
-    values = predict_reward_values(artifacts["reward_model"], obs, config)
-    progress = raw - values
+    if episode_buffers is None:
+        obs = np.asarray(observations, dtype=np.float32)
+        actions = np.asarray(actions, dtype=np.int64)
+        step_ids = np.asarray(step_ids, dtype=np.int64)
+        for i in range(batch_size):
+            flat = _flat_from_sequences(
+                obs[i:i + 1], actions[i:i + 1], raw[i:i + 1]
+            )
+            shaped[i] = _shape_latest_from_flat(flat, artifacts)
+        return shaped.astype(np.float32)
 
-    if config.use_verifier and artifacts["verifier"] is not None:
-        actions_clipped = np.clip(actions, 0, config.action_size - 1)
-        verifier_scores = predict_verifier_scores(
-            artifacts["verifier"], obs, actions_clipped, config
-        )
-    else:
-        verifier_scores = np.ones_like(progress, dtype=np.float32)
-
-    contribution = progress if config.use_raw_progress else progress * verifier_scores
-    alpha_scale = compute_alpha_scale(verifier_scores, config)
-    shaped, _normalized = shape_rewards_frozen(
-        raw,
-        contribution,
-        step_ids,
-        stats.get("norm_by_step", {}),
-        alpha=config.alpha,
-        clip_c=config.clip_c,
-        use_clipping=config.use_clipping,
-        alpha_scale=alpha_scale,
-    )
-    shaped = cap_shaped_rewards(raw, shaped, config)
+    for i in range(batch_size):
+        flat = episode_buffers[i].to_flat()
+        if flat is None:
+            shaped[i] = float(raw[i])
+        else:
+            shaped[i] = _shape_latest_from_flat(flat, artifacts)
     return shaped.astype(np.float32)
 
 
 def apply_pav_to_episode(transitions, artifacts):
-    """Dense per-step shaped rewards for one episode (offline / batch helper)."""
+    """Dense per-step shaped rewards for one episode."""
     if not transitions:
         return []
-
-    config = artifacts["config"]
-    stats = artifacts["stats"]
     flat = _transitions_to_flat(transitions)
-
-    values = predict_reward_values(artifacts["reward_model"], flat["observations"], config)
-    progress = compute_k_step_progress(flat, values, config.k, config.gamma)
-
-    if config.use_verifier and artifacts["verifier"] is not None:
-        actions = np.clip(flat["actions"], 0, config.action_size - 1)
-        verifier_scores = predict_verifier_scores(
-            artifacts["verifier"], flat["observations"], actions, config
-        )
-    else:
-        verifier_scores = np.ones_like(progress, dtype=np.float32)
-
-    if config.use_raw_progress:
-        contribution = progress
-    else:
-        contribution = progress * verifier_scores
-
-    alpha_scale = compute_alpha_scale(verifier_scores, config)
-    shaped, _normalized = shape_rewards_frozen(
-        flat["rewards"],
-        contribution,
-        flat["step_ids"],
-        stats.get("norm_by_step", {}),
-        alpha=config.alpha,
-        clip_c=config.clip_c,
-        use_clipping=config.use_clipping,
-        alpha_scale=alpha_scale,
-    )
-    shaped = cap_shaped_rewards(flat["rewards"], shaped, config)
-    return shaped.tolist()
+    return compute_shaped_rewards_for_flat(flat, artifacts).tolist()
 
 
 def compute_step_shaped_reward(transitions_prefix, artifacts):
-    """Shaped reward for the latest step (single-slot API, incremental)."""
+    """Shaped reward for the latest step (incremental API)."""
     if not transitions_prefix:
         return 0.0
-    last = transitions_prefix[-1]
-    step_id = len(transitions_prefix) - 1
-    obs = np.asarray([obs_vector(last["obs"])], dtype=np.float32)
-    actions = np.asarray([int(last["action"])], dtype=np.int64)
-    raw = np.asarray([float(last["raw_reward"])], dtype=np.float32)
-    step_ids = np.asarray([step_id], dtype=np.int64)
-    shaped = shape_latest_steps_batched(obs, actions, raw, step_ids, artifacts)
-    return float(shaped[0])
+    flat = _transitions_to_flat(transitions_prefix)
+    return _shape_latest_from_flat(flat, artifacts)
 
 
 class PAVRewardWrapper(object):
-    """Gym-style wrapper: streaming dense PAV shaped reward each step (Scheme C)."""
+    """Gym wrapper: full v2 progress (k-step + directional) × Verifier gate each step."""
 
     def __init__(self, env, artifacts=None, enabled=True):
         self.env = env
@@ -253,6 +269,7 @@ class PAVRewardWrapper(object):
         self.enabled = bool(enabled and artifacts is not None)
         self.batch_size = int(getattr(env, "batch_size", 1))
         self._step_ids = [0 for _ in range(self.batch_size)]
+        self._buffers = [_EpisodeBuffer() for _ in range(self.batch_size)]
 
     def __getattr__(self, name):
         return getattr(self.env, name)
@@ -262,6 +279,8 @@ class PAVRewardWrapper(object):
 
     def reset(self, **kwargs):
         self._step_ids = [0 for _ in range(self.batch_size)]
+        for buf in self._buffers:
+            buf.clear()
         return self.env.reset(**kwargs)
 
     def step(self, action):
@@ -275,16 +294,20 @@ class PAVRewardWrapper(object):
         actions = np.asarray(as_batch_list(action, self.batch_size), dtype=np.int64)
         raw_items = np.asarray(as_batch_list(raw_reward, self.batch_size), dtype=np.float32)
         done_items = as_batch_list(done, self.batch_size)
-        step_id_arr = np.asarray(self._step_ids, dtype=np.int64)
 
+        for i in range(self.batch_size):
+            self._buffers[i].append(obs_batch[i], actions[i], raw_items[i])
+
+        step_id_arr = np.asarray(self._step_ids, dtype=np.int64)
         shaped_items = shape_latest_steps_batched(
-            obs_batch, actions, raw_items, step_id_arr, self.artifacts
+            obs_batch, actions, raw_items, step_id_arr, self.artifacts, self._buffers
         )
 
         for i, dn in enumerate(done_items):
             self._step_ids[i] += 1
             if dn:
                 self._step_ids[i] = 0
+                self._buffers[i].clear()
 
         if self.batch_size == 1:
             return next_obs, float(shaped_items[0]), done, info
