@@ -27,15 +27,15 @@ PAV 使用**两个网络 + 一个非网络量**，职责明确分离：
 
 | 组件 | 符号 | 输入 | 估计对象 |
 |------|------|------|----------|
-| Reward Model | `R_φ(s)` | 状态 s | 状态潜力 E[G_t \| s_t]；可选 embed 向量 `e(s)` |
-| Progress（非网络） | `p_t` | 由 R_φ 与轨迹计算 | k 步局部进步 + 可选方向项 |
-| Verifier | `V_ψ(s,a)` | 状态 + 动作 | 局部进步是否可靠 P(Z_t=1 \| s,a) |
+| Reward Model | $R_\phi(s)$ | 状态 $s$ | 状态潜力 $\mathbb{E}[G_t \mid s_t]$；可选 embed $e(s)$ |
+| Progress（非网络） | $p_t$ | 由 $R_\phi$ 与轨迹计算 | k 步局部进步 + 可选方向项 |
+| Verifier | $V_\psi(s,a)$ | 状态 + 动作 | 局部进步可靠性 $P(Z_t{=}1 \mid s,a)$ |
 
 **关键约束**：
 
-- `R_φ` **不输入动作**，因此不是 Q(s,a)。
-- `V_ψ` 预测 **progress 可靠性**，不是最终购买/成功概率。
-- Progress **不是第三个网络**，而是由 `R_φ` 在轨迹上诱导出的标量。
+- $R_\phi$ **不输入动作**，因此不是 $Q(s,a)$。
+- $V_\psi$ 预测 **progress 可靠性**，不是最终购买/成功概率。
+- Progress **不是第三个网络**，而是由 $R_\phi$ 在轨迹上诱导出的标量。
 
 ### 方法流程
 
@@ -64,92 +64,87 @@ MDPDataset 或在线 rollout
 
 ### 核心公式
 
-> 说明：下文公式刻意不用 LaTeX 块（GitHub 网页对 `\operatorname` 等宏支持差，会显示红框）。
-> 符号均用 Unicode + 行内代码，在浏览器里可直接阅读。
-
-符号：`t` 当前步，`K_t = min(k, H−t)`，`G_t` 从 t 起的回报，`R_φ(s)` 状态潜力，`V_ψ(s,a)` Verifier 分数。
+符号：$t$ 为当前步，$K_t = \min(k, H-t)$，$G_t$ 为从 $t$ 起的回报，$R_\phi(s)$ 为状态潜力，$V_\psi(s,a)$ 为 Verifier 分数。
 
 #### 1. k-step Progress
 
-**一行公式：**
-
-> `p_t^k = Σ γ^i·r_{t+i} + 𝟙[K_t=k]·γ^k·R_φ(s_{t+k}) − R_φ(s_t)`  
-> （求和 i 从 0 到 K_t−1）
+$$
+p_t^k = \sum_{i=0}^{K_t-1} \gamma^i r_{t+i} + \mathbf{1}[K_t{=}k]\,\gamma^k R_\phi(s_{t+k}) - R_\phi(s_t)
+$$
 
 | 项 | 含义 |
 |----|------|
-| `Σ γ^i·r_{t+i}` | 动作后 K_t 步内**已经到账**的 reward |
-| `γ^k·R_φ(s_{t+k})` | 仅当还能完整看 k 步时，bootstrap 剩余潜力 |
-| `− R_φ(s_t)` | 减去动作前状态潜力，只保留**动作增量** |
+| $\sum_{i=0}^{K_t-1} \gamma^i r_{t+i}$ | 动作后 $K_t$ 步内**已经到账**的 reward |
+| $\gamma^k R_\phi(s_{t+k})$ | 仅当 $K_t{=}k$ 时 bootstrap 剩余潜力 |
+| $- R_\phi(s_t)$ | 减去动作前状态潜力，只保留**动作增量** |
 
 #### 2. Directional Progress（`directional_lambda > 0`）
 
-Reward Model 共享 trunk，另接 L2 归一化 **embed head** `e(s)`：
+Reward Model 共享 trunk，另接 L2 归一化 **embed head** $e(s)$：
 
-| 量 | 定义 |
-|----|------|
-| `g` | `e(s_0)`，session 起点 embed |
-| `Δ_dir` | `cos(e(s_{t+K}), g) − cos(e(s_t), g)` |
-| `p_t` | `p_t^k + λ·Δ_dir` |
+$$
+g = e(s_0), \qquad
+\Delta_t^{\text{dir}} = \cos\!\big(e(s_{t+K}),\, g\big) - \cos\!\big(e(s_t),\, g\big), \qquad
+p_t = p_t^k + \lambda\,\Delta_t^{\text{dir}}
+$$
 
 | 配置 | 默认 | 推荐 |
 |------|------|------|
-| `directional_lambda` (λ) | 0 | 0.5 |
+| `directional_lambda` ($\lambda$) | 0 | 0.5 |
 | `embed_dim` | 64 | 64 |
 
 #### 3. Verifier 标签（`verifier_label_mode`）
 
-| 模式 | 何时 Z_t = 1 |
-|------|----------------|
-| `sign` | `sign(p_t − b_p(t))` 与 `sign(G_t − Ḡ(t))` **同向** |
-| `necessity` | `(G_t − R_φ(s_t))` **高于**同 step necessity baseline |
-| `necessity_combined` (**推荐**) | necessity **且** progress 相对 baseline 为正 excess |
+| 模式 | 标签定义 |
+|------|----------|
+| `sign` | $Z_t{=}1 \iff \text{sign}(p_t - b_p(t)) = \text{sign}(G_t - \bar{G}(t))$ |
+| `necessity` | $Z_t{=}1 \iff (G_t - R_\phi(s_t)) > b_N(t)$ |
+| `necessity_combined`（**推荐**） | 上式 necessity **且** $(p_t - b_p(t)) > m_p(t)$ |
 
-`b_p(t)`、`Ḡ(t)` 为同 step 上的 batch 均值；excess 需超过 `verifier_margin_frac × std`（默认 0.25）。
+$b_p(t)$、$\bar{G}(t)$、$b_N(t)$ 为同 step 上的 batch 均值；excess 需超过 `verifier_margin_frac` $\times$ 标准差（默认 0.25）。
 
-#### 4. Consistency 微调 R_φ（可选，Verifier 训练后）
+#### 4. Consistency 微调 $R_\phi$（可选，Verifier 训练后）
 
-**目的：** Verifier 已训好后，对 R_φ 做短阶段微调，**压低「Verifier 认为不可靠、但 R_φ 仍给出大 progress」的 transition**，减轻虚假局部进步。
+Verifier 训完后，对 $R_\phi$ 做短阶段微调，**压低「Verifier 认为不可靠、但 $R_\phi$ 仍给出大 progress」的 transition**：
 
-**一行公式：**
+$$
+\mathcal{L} = \mathcal{L}_R + \beta\,\mathbb{E}\Big[\big(1 - V_\psi(s_t,a_t)\big)\,\big|p_t\big|\Big]
+$$
 
-> `L = L_R + β · E[ (1 − V_ψ(s_t,a_t)) · |p_t| ]`
+其中 $\mathcal{L}_R = \mathbb{E}\big[(R_\phi(s_t) - G_t)^2\big]$，$\beta$ 为 `consistency_beta`（$>0$ 启用，推荐 0.1），$|p_t|$ 为**可微** k-step progress 幅度。
 
-| 符号 | 含义 |
-|------|------|
-| `L_R` | Reward Model 原损失 `MSE(R_φ(s_t), G_t)` |
-| `β` | `consistency_beta`；**> 0 才启用**，推荐 **0.1** |
-| `V_ψ` | 已冻结的 Verifier 输出（0~1） |
-| `|p_t|` | **可微** k-step progress 的幅度 |
+开启 directional 时，微调阶段
 
-**开启 directional 时**，微调阶段 progress 为：
+$$
+p_t = p_t^k + \lambda\,\Delta_t^{\text{dir}}
+$$
 
-> `p_t = p_t^k + λ·Δ_dir`（方向项 Δ_dir **当常数**，不对 embed 反传）
+方向项 $\Delta_t^{\text{dir}}$ **当常数**（不对 embed 反传）。
 
 | 配置 | 默认 | 推荐 |
 |------|------|------|
 | `consistency_beta` | 0 | 0.1 |
 | `consistency_epochs` | 2 | 2 |
 
-**代码实现：** `rl4rs/pav/trainer.py` → `finetune_reward_consistency()`（docstring: *Chopsticks-style consistency*）。
+实现：`rl4rs/pav/trainer.py` → `finetune_reward_consistency()`。
 
 #### 5. Verified Contribution & Shaped Reward
 
-| 量 | 公式 |
-|----|------|
-| Verified contribution | `C_t = p_t × V_ψ(s_t, a_t)` |
-| Shaped reward | `r'_t = r_t + α · clip(norm(C_t), −c, c)` |
+$$
+C_t = p_t \cdot V_\psi(s_t, a_t), \qquad
+r'_t = r_t + \alpha \cdot \text{clip}\!\big(\text{norm}(C_t),\,-c,\,c\big)
+$$
 
-| p_t | V_ψ 高 | V_ψ 低 |
-|-----|--------|--------|
-| > 0 | 可靠正贡献 | 看似进步，贡献被压低 |
-| < 0 | 可靠负贡献 | 负判断不可靠，被压低 |
+| $p_t$ | $V_\psi$ 高 | $V_\psi$ 低 |
+|-------|-------------|-------------|
+| $> 0$ | 可靠正贡献 | 看似进步，贡献被压低 |
+| $< 0$ | 可靠负贡献 | 负判断不可靠，被压低 |
 
 | 超参 | 值 |
 |------|-----|
-| `alpha` (α) | 0.1 |
-| `clip_c` (c) | 3 |
-| `k` | 3（SlateRecEnv）/ 5（SeqSlateRecEnv） |
+| $\alpha$ | 0.1 |
+| $c$ | 3 |
+| $k$ | 3（SlateRecEnv）/ 5（SeqSlateRecEnv） |
 
 更完整的理论定义见 [`docs/pav/`](docs/pav/)。
 
