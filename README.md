@@ -1,23 +1,23 @@
 # RL4RS-PAV
 
-**Process Advantage Verifiers (PAV)** — 面向 RL4RS 离线推荐场景的 process-level credit assignment 与 reward shaping 框架。
+**Process Advantage Verifiers (PAV)** — 面向 RL4RS 推荐场景的 process-level credit assignment 与 reward shaping 框架。
 
-本项目基于 [RL4RS](https://github.com/fuxiAIlab/RL4RS) 公开代码与 MDP 建模，在不修改环境的前提下，为 offline RL 提供**被验证过的过程贡献信号**，缓解 delayed reward 带来的 credit assignment 困难。
+本项目基于 [RL4RS](https://github.com/fuxiAIlab/RL4RS) 公开代码与 MDP 建模，在不修改环境 transition 的前提下，为 **离线 RL**（CQL / BCQ / BC）与 **在线 RL**（Q-learning / RLlib DQN·PPO）提供**被验证过的过程贡献信号**，缓解 delayed reward 带来的 credit assignment 困难。
 
 [![License](https://licensebuttons.net/l/by/3.0/88x31.png)](https://creativecommons.org/licenses/by/4.0/)
 
 ---
 
-## 动机：RL4RS 的 credit assignment 问题
+## 动机
 
-在 RL4RS 中，单个 item 推荐动作的影响往往要等到 **slate 完成**或 **page 结束**才体现在 reward 上。原始离线数据里，前面多步 reward 为 0，最终一步才出现聚合收益。
+在 RL4RS 中，单个 item 推荐动作的影响往往要等到 **slate 完成**或 **page 结束**才体现在 reward 上。原始数据里前几步 reward 常为 0，最后一步才出现聚合收益。
 
 这带来两个问题：
 
-1. **状态质量 vs 动作贡献混淆**：一个本来就很「有希望」的状态，会让任意动作看起来都不错。
-2. **虚假局部进步**：某些动作可能短期提升状态潜力，但最终偏离用户真实意图。
+1. **状态质量 vs 动作贡献混淆**：高潜力状态下，任意动作看起来都不错。
+2. **虚假局部进步**：短期状态潜力上升，但最终偏离用户意图。
 
-PAV 的目标是把这两个问题拆开，并只把**可靠的动作增量**注入 offline RL 训练。
+PAV 用 **Reward Model（状态潜力）+ Progress（动作增量）+ Verifier（增量可靠性）** 拆开上述问题，只把可靠的过程贡献注入 RL 训练。
 
 ---
 
@@ -27,88 +27,203 @@ PAV 使用**两个网络 + 一个非网络量**，职责明确分离：
 
 | 组件 | 符号 | 输入 | 估计对象 |
 |------|------|------|----------|
-| Reward Model | $R_\phi(s)$ | 状态 $s$ | 状态潜力 $\mathbb{E}[G_t \mid s_t]$ |
-| Progress（非网络） | $p_t^k$ | 由 $R_\phi$ 与轨迹计算 | 动作的 k 步局部进步 |
-| Verifier | $V_\psi(s,a)$ | 状态 + 动作 | 局部进步是否可靠 $P(Z_t{=}1 \mid s,a)$ |
+| Reward Model | `R_φ(s)` | 状态 s | 状态潜力 E[G_t \| s_t]；可选 embed 向量 `e(s)` |
+| Progress（非网络） | `p_t` | 由 R_φ 与轨迹计算 | k 步局部进步 + 可选方向项 |
+| Verifier | `V_ψ(s,a)` | 状态 + 动作 | 局部进步是否可靠 P(Z_t=1 \| s,a) |
 
-**关键约束**：$R_\phi$ 不输入动作，因此不是 $Q(s,a)$；$V_\psi$ 预测的是 progress 可靠性，也不是最终成功概率。
+**关键约束**：
+
+- `R_φ` **不输入动作**，因此不是 Q(s,a)。
+- `V_ψ` 预测 **progress 可靠性**，不是最终购买/成功概率。
+- Progress **不是第三个网络**，而是由 `R_φ` 在轨迹上诱导出的标量。
 
 ### 方法流程
 
 ```
-离线 MDPDataset
+MDPDataset 或在线 rollout
     │
-    ├─► 训练 R_φ(s)     目标：MSE(R_φ, G_t)
+    ├─► 训练 R_φ(s) [+ embed head]     目标：MSE(R_φ, G_t)
     │
-    ├─► 计算 p_t^k      非网络：k-step reward + 状态潜力差
+    ├─► 计算 p_t^k                     k-step reward + bootstrap R_φ(s_{t+k}) − R_φ(s_t)
     │
-    ├─► 生成标签 Z_t    outcome consistency（同 step baseline 比较）
+    ├─► [可选] 方向项                  p_t = p_t^k + λ·(cos(e_{t+K}, g) − cos(e_t, g))，g = e(s_0)
     │
-    ├─► 训练 V_ψ(s,a)   目标：BCE(V_ψ, Z_t)
+    ├─► 生成标签 Z_t                   outcome sign / necessity / 组合（同 step baseline）
     │
-    ├─► C_t = p_t^k × V_ψ(s,a)    verified contribution
+    ├─► 训练 V_ψ(s,a)                  目标：BCE(V_ψ, Z_t)
     │
-    └─► r'_t = r_t + α · clip(norm(C_t))    shaped reward
-            → 导出新的 MDPDataset → CQL / BCQ / BC 训练
+    ├─► [可选] Consistency 微调 R_φ    低 V_ψ 时惩罚 |progress|，减轻虚假局部信号
+    │
+    ├─► C_t = p_t × V_ψ(s,a)           verified contribution（Verifier 默认开启）
+    │
+    └─► r'_t = r_t + α · clip(norm(C_t))
+            │
+            ├─► 离线：导出 shaped H5 → CQL / BCQ / BC
+            └─► 在线：PAVRewardWrapper 训练；eval 仍用 raw simulator reward
 ```
 
 ### 核心公式
 
-**k-step Progress**（$K_t = \min(k, H-t)$）：
+> 说明：下文公式刻意不用 LaTeX 块（GitHub 网页对 `\operatorname` 等宏支持差，会显示红框）。
+> 符号均用 Unicode + 行内代码，在浏览器里可直接阅读。
 
-$$p_t^k = \sum_{i=0}^{K_t-1}\gamma^i r_{t+i} + \mathbf{1}[K_t{=}k]\,\gamma^k R_\phi(s_{t+k}) - R_\phi(s_t)$$
+符号：`t` 当前步，`K_t = min(k, H−t)`，`G_t` 从 t 起的回报，`R_φ(s)` 状态潜力，`V_ψ(s,a)` Verifier 分数。
 
-**Verifier 标签**（第一版 outcome consistency）：
+#### 1. k-step Progress
 
-$$Z_t = \mathbf{1}\big[\operatorname{sign}(p_t^k - b_p(t)) = \operatorname{sign}(G_t - \bar G(t))\big]$$
+**一行公式：**
 
-**Verified Contribution & Shaped Reward**：
+> `p_t^k = Σ γ^i·r_{t+i} + 𝟙[K_t=k]·γ^k·R_φ(s_{t+k}) − R_φ(s_t)`  
+> （求和 i 从 0 到 K_t−1）
 
-$$C_t = p_t^k \cdot V_\psi(s_t, a_t), \qquad r'_t = r_t + \alpha \cdot \operatorname{clip}(\operatorname{norm}(C_t),\,-c,\,c)$$
+| 项 | 含义 |
+|----|------|
+| `Σ γ^i·r_{t+i}` | 动作后 K_t 步内**已经到账**的 reward |
+| `γ^k·R_φ(s_{t+k})` | 仅当还能完整看 k 步时，bootstrap 剩余潜力 |
+| `− R_φ(s_t)` | 减去动作前状态潜力，只保留**动作增量** |
 
-默认超参：$\alpha{=}0.1$，$c{=}3$，$k{=}3$（`SlateRecEnv-v0`）/ $k{=}5$（`SeqSlateRecEnv-v0`）。
+#### 2. Directional Progress（`directional_lambda > 0`）
+
+Reward Model 共享 trunk，另接 L2 归一化 **embed head** `e(s)`：
+
+| 量 | 定义 |
+|----|------|
+| `g` | `e(s_0)`，session 起点 embed |
+| `Δ_dir` | `cos(e(s_{t+K}), g) − cos(e(s_t), g)` |
+| `p_t` | `p_t^k + λ·Δ_dir` |
+
+| 配置 | 默认 | 推荐 |
+|------|------|------|
+| `directional_lambda` (λ) | 0 | 0.5 |
+| `embed_dim` | 64 | 64 |
+
+#### 3. Verifier 标签（`verifier_label_mode`）
+
+| 模式 | 何时 Z_t = 1 |
+|------|----------------|
+| `sign` | `sign(p_t − b_p(t))` 与 `sign(G_t − Ḡ(t))` **同向** |
+| `necessity` | `(G_t − R_φ(s_t))` **高于**同 step necessity baseline |
+| `necessity_combined` (**推荐**) | necessity **且** progress 相对 baseline 为正 excess |
+
+`b_p(t)`、`Ḡ(t)` 为同 step 上的 batch 均值；excess 需超过 `verifier_margin_frac × std`（默认 0.25）。
+
+#### 4. Consistency 微调 R_φ（可选，Verifier 训练后）
+
+**目的：** Verifier 已训好后，对 R_φ 做短阶段微调，**压低「Verifier 认为不可靠、但 R_φ 仍给出大 progress」的 transition**，减轻虚假局部进步。
+
+**一行公式：**
+
+> `L = L_R + β · E[ (1 − V_ψ(s_t,a_t)) · |p_t| ]`
+
+| 符号 | 含义 |
+|------|------|
+| `L_R` | Reward Model 原损失 `MSE(R_φ(s_t), G_t)` |
+| `β` | `consistency_beta`；**> 0 才启用**，推荐 **0.1** |
+| `V_ψ` | 已冻结的 Verifier 输出（0~1） |
+| `|p_t|` | **可微** k-step progress 的幅度 |
+
+**开启 directional 时**，微调阶段 progress 为：
+
+> `p_t = p_t^k + λ·Δ_dir`（方向项 Δ_dir **当常数**，不对 embed 反传）
+
+| 配置 | 默认 | 推荐 |
+|------|------|------|
+| `consistency_beta` | 0 | 0.1 |
+| `consistency_epochs` | 2 | 2 |
+
+**代码实现：** `rl4rs/pav/trainer.py` → `finetune_reward_consistency()`（docstring: *Chopsticks-style consistency*）。
+
+#### 5. Verified Contribution & Shaped Reward
+
+| 量 | 公式 |
+|----|------|
+| Verified contribution | `C_t = p_t × V_ψ(s_t, a_t)` |
+| Shaped reward | `r'_t = r_t + α · clip(norm(C_t), −c, c)` |
+
+| p_t | V_ψ 高 | V_ψ 低 |
+|-----|--------|--------|
+| > 0 | 可靠正贡献 | 看似进步，贡献被压低 |
+| < 0 | 可靠负贡献 | 负判断不可靠，被压低 |
+
+| 超参 | 值 |
+|------|-----|
+| `alpha` (α) | 0.1 |
+| `clip_c` (c) | 3 |
+| `k` | 3（SlateRecEnv）/ 5（SeqSlateRecEnv） |
 
 更完整的理论定义见 [`docs/pav/`](docs/pav/)。
+
+---
+
+## 推荐配置
+
+离线 shaping 与在线 pilot 的常用默认值（`rl4rs/online/config.py` → `default_pav_config`）：
+
+```python
+RECOMMENDED = {
+    "suffix": "pav_v2",
+    "directional_lambda": 0.5,
+    "embed_dim": 64,
+    "verifier_label_mode": "necessity_combined",
+    "consistency_beta": 0.1,
+    "use_verifier": True,
+    "alpha": 0.1,
+    "clip_c": 3.0,
+}
+```
+
+---
+
+## 两条使用路径
+
+| 路径 | Progress 计算 | 训练 reward | 评估 reward |
+|------|---------------|-------------|-------------|
+| **离线** | 完整 k-step + directional + consistency | shaped `.h5` | simulator raw |
+| **在线** | `PAVRewardWrapper` 维护 episode 前缀，逐步算完整 p_t | shaped | **raw**（wrapper `enabled=False`） |
+
+在线 wrapper（`rl4rs/pav/online.py`）在 vector env 中为每条 trajectory 缓存前缀，每步重算 k-step + directional progress 并乘 Verifier，与离线定义一致。
 
 ---
 
 ## 项目结构
 
 ```
-RL4RS-main/
+RL4RS-PAV/
 ├── rl4rs/
-│   ├── env/              # RL4RS 环境（SlateRecEnv / SeqSlateRecEnv）
-│   ├── nets/             # 仿真器与 offline RL 网络
-│   ├── online/           # ★ 在线 RL 配置与环境工具
-│   └── pav/              # ★ PAV 核心实现
-│       ├── config.py     # 超参与路径配置
-│       ├── dataset.py    # MDPDataset 展开与导出
-│       ├── models.py     # RewardModel / Verifier（含 embed head）
-│       ├── progress.py   # k-step / directional progress, necessity 标签
-│       ├── trainer.py    # 训练 + consistency fine-tune
-│       ├── online.py     # ★ 在线 PAVRewardWrapper（streaming v2）
-│       └── pipeline.py   # 对外入口 build_pav_dataset()
+│   ├── env/                 # SlateRecEnv / SeqSlateRecEnv
+│   ├── nets/                # 仿真器、CQL/BCQ、RLlib 模型
+│   ├── pav/
+│   │   ├── config.py        # PAVConfig（directional / necessity / consistency 等）
+│   │   ├── models.py        # RewardModel + embed head, Verifier
+│   │   ├── progress.py      # k-step / directional progress, verifier labels
+│   │   ├── trainer.py       # fit R_φ / V_ψ, consistency fine-tune
+│   │   ├── online.py        # frozen inference, PAVRewardWrapper
+│   │   └── pipeline.py      # build_pav_dataset()
+│   └── online/
+│       ├── qlearning.py     # PyTorch masked Q-learning
+│       ├── config.py        # env / default_pav_config
+│       └── pav_cli.py       # --pav-suffix, --no-verifier 等
 ├── script/
-│   ├── pav_train.py      # PAV 命令行入口
-│   ├── batchrl_train.py  # offline RL 训练（支持 use_pav）
-│   ├── dqn_pav_pilot.py  # ★ RLlib DQN + 在线 PAV
-│   ├── ppo_pav_pilot.py  # ★ RLlib PPO（官方 modelfree 配置）+ PAV
-│   └── qlearning_train.py
-├── reproductions/
-│   └── run_pav.sh        # 端到端复现脚本
-└── docs/pav/             # MDP 建模、PAV 定义、实验协议
+│   ├── pav_train.py         # 离线 fit + shape H5
+│   ├── batchrl_train.py     # CQL / BCQ / BC（use_pav）
+│   ├── dqn_pav_pilot.py     # RLlib DQN × raw / PAV
+│   ├── ppo_pav_pilot.py     # RLlib PPO × raw / PAV
+│   ├── qlearning_train.py   # PyTorch Q-learning pilot
+│   ├── pav_ablation_fast.py # 快速消融
+│   └── online_phase0_smoke.py
+├── reproductions/           # run_pav.sh, run_qlearning_pilot.sh, run_dqn_pav_pilot.sh 等
+└── docs/pav/                # 理论、实验协议、online_runbook
 ```
 
-**PAV 接入点**：在 `MDPDataset` 生成之后、offline RL 训练之前，不侵入 `rl4rs/env/`。
+PAV 不修改 `rl4rs/env/` 的 transition 与原始 reward 定义。
 
 ---
 
 ## 环境要求
 
-- Linux（推荐）或 Windows
-- Python 3.6+，Conda
-- 至少 64 GB 内存（RL4RS 原始要求）
-- GPU（训练 Reward Model / Verifier / CQL 时推荐）
+- Linux（推荐）；Python 3.6+（在线 pilot 推荐 3.8 + `nvidia-tensorflow`）；Conda；≥64 GB RAM（完整 offline 流程）
+- GPU：训练 R_φ / V_ψ、在线 DQN/PPO 推荐
+- RTX 4090：仿真器需 `bash reproductions/setup_rl4rs_tf115_gpu.sh` 安装 TF 1.15.5+nv23.02；详见 [`docs/pav/online_runbook.md`](docs/pav/online_runbook.md)
 
 ---
 
@@ -122,129 +237,127 @@ conda env create -f environment.yml
 conda activate rl4rs
 ```
 
-### 数据集下载
+### 数据集
 
-本仓库**不包含**大型数据文件（`dataset/*.csv`、`dataset/*.h5` 已在 `.gitignore` 中排除）。请从 RL4RS 官方渠道下载后放到 `dataset/` 目录：
+大型文件不在仓库内。从 RL4RS 官方下载后放入 `dataset/`：
 
 | 资源 | 链接 |
 |------|------|
-| 数据（仅数据） | https://zenodo.org/record/6622390 |
+| 数据 | https://zenodo.org/record/6622390 |
 | 完整复现包 | https://drive.google.com/file/d/1YbPtPyYrMvMGOuqD4oHvK0epDtEhEb9v/view |
 
-至少需要：
-
-- `dataset/item_info.csv`（已随仓库提供）
-- `dataset/rl4rs_dataset_a_shuf.csv`（`SlateRecEnv-v0`）
-- `dataset/rl4rs_dataset_b3_shuf.csv`（`SeqSlateRecEnv-v0`）
-- `output/simulator_a_dien/model`（仿真器，需先训练或从复现包获取）
+至少需要 `item_info.csv`、`rl4rs_dataset_a_shuf.csv`、`rl4rs_dataset_b3_shuf.csv`，以及 `output/simulator_a_dien/model`。
 
 ---
 
 ## 快速开始
 
-### 1. 仅运行 PAV reward shaping
+### 1. 离线：PAV reward shaping
 
 ```bash
 export rl4rs_dataset_dir=../dataset
 export rl4rs_output_dir=../output
 
 cd script
-python pav_train.py shape_dataset "{'env':'SlateRecEnv-v0','trial_name':'a_all'}"
+python pav_train.py shape_dataset "{'env':'SlateRecEnv-v0','trial_name':'a_all','suffix':'pav_v2','directional_lambda':0.5,'verifier_label_mode':'necessity_combined','consistency_beta':0.1}"
 ```
 
-输出：
+输出：`dataset/*_pav_v2.h5`、`output/pav/Reward_*.pt`、`Verifier_*.pt`、`stats_*.json`。
 
-- `dataset/SlateRecEnv-v0_a_all_pav.h5` — shaped 离线数据集
-- `output/pav/Reward_*.pt` — Reward Model 权重
-- `output/pav/Verifier_*.pt` — Verifier 权重
-- `output/pav/stats_*.json` — 训练统计
-
-### 2. 生成诊断报告
+### 2. 诊断
 
 ```bash
-python pav_train.py diagnostics "{'env':'SlateRecEnv-v0','trial_name':'a_all'}"
+python pav_train.py diagnostics "{'env':'SlateRecEnv-v0','trial_name':'a_all','suffix':'pav_v2'}"
 ```
 
-### 3. 端到端：PAV + Offline RL
+### 3. 离线 RL
 
 ```bash
 cd reproductions
 bash run_pav.sh CQL SlateRecEnv-v0 a_all
 ```
 
-流程：`dataset_generate` → `PAV shape` → `PAV diagnostics` → `CQL train` → `eval` → `OPE`
+或指定 shaped 后缀：
 
-训练时通过 `use_pav=True` 自动加载 shaped 数据集：
-
-```python
-python batchrl_train.py CQL train "{'env':'SlateRecEnv-v0','trial_name':'a_all','use_pav':True}"
+```bash
+python batchrl_train.py CQL train "{'env':'SlateRecEnv-v0','trial_name':'a_all','use_pav':True,'pav_suffix':'pav_v2'}"
 ```
 
-### 4. Python API
+### 4. 在线：DQN / PPO pilot
 
-```python
-from rl4rs.pav import PAVConfig, build_pav_dataset
-
-config = PAVConfig.from_dict({
-    "env": "SlateRecEnv-v0",
-    "trial_name": "a_all",
-    "alpha": 0.1,
-    "k": 3,
-})
-shaped_path, stats = build_pav_dataset(config)
-```
-
-### 5. Online RL（PAV v2 + DQN/PPO）
-
-除离线 shaped H5 外，本仓库新增 **在线 streaming PAV**：每步用 k-step + directional progress，默认 **乘 Verifier 门控** \(C_t = p_t \cdot V_\psi(s,a)\)，eval 仍在 raw DIEN simulator 上测。
+训练阶段 `--use-pav` 启用 `PAVRewardWrapper`；**评估**在 raw DIEN simulator 上测 return。
 
 ```bash
 export rl4rs_output_dir=$PWD/output
 export rl4rs_dataset_dir=$PWD/dataset
 
-# 小 pilot：DQN raw vs PAV
+# DQN raw vs PAV
 python script/dqn_pav_pilot.py --seed 0 --epochs 100
 python script/dqn_pav_pilot.py --use-pav --pav-suffix pav_v2 --seed 0 --epochs 100
 
-# 官方 modelfree 对齐：PPO raw vs PAV
+# PPO raw vs PAV
 python script/ppo_pav_pilot.py --seed 0 --epochs 100
 python script/ppo_pav_pilot.py --use-pav --pav-suffix pav_v2 --seed 0 --epochs 100
 ```
 
-模块：`rl4rs/pav/online.py`（`PAVRewardWrapper`）、`rl4rs/online/`（config/env）、`script/dqn_pav_pilot.py` / `script/ppo_pav_pilot.py`。详见 [`docs/pav/online_runbook.md`](docs/pav/online_runbook.md)。
+### 5. 在线：PyTorch Q-learning
+
+```bash
+python script/qlearning_train.py train --seed 0 --num-episodes 2000
+python script/qlearning_train.py train --use-pav --seed 0 --num-episodes 2000
+```
+
+一键脚本：`bash reproductions/run_qlearning_pilot.sh 0 32`
+
+### 6. Python API
+
+```python
+from rl4rs.pav import PAVConfig, build_pav_dataset
+from rl4rs.pav.online import load_pav_artifacts, PAVRewardWrapper
+from rl4rs.online.config import default_pav_config
+from rl4rs.online.env_utils import make_slate_env
+
+# 离线
+cfg = PAVConfig.from_dict(default_pav_config("../output", "../dataset").__dict__)
+shaped_path, stats = build_pav_dataset(cfg)
+
+# 在线
+artifacts = load_pav_artifacts(cfg)
+env = PAVRewardWrapper(make_slate_env(env_cfg), artifacts=artifacts, enabled=True)
+```
+
+完整在线流程见 [`docs/pav/online_runbook.md`](docs/pav/online_runbook.md)。
 
 ---
 
-## 实验对比
+## 实验
 
-主实验对比 **Offline RL（原始 reward）** vs **Offline RL + PAV（shaped reward）**：
+| 设置 | 离线 | 在线 |
+|------|------|------|
+| 算法 | CQL / BCQ / BC | Q-learning / RLlib DQN·PPO |
+| 对比 | raw reward vs shaped H5 | raw env vs PAVRewardWrapper |
+| 环境 | SlateRecEnv (H=9), SeqSlateRecEnv (H=36) | 同上 |
 
-| 算法 | 原始 | + PAV |
-|------|:----:|:-----:|
-| CQL | ✓ | ✓ |
-| BCQ | ✓ | ✓ |
-| BC | ✓ | ✓ |
-
-支持环境：
-
-- `SlateRecEnv-v0`（9-step slate，$H=9$）
-- `SeqSlateRecEnv-v0`（4-page sequential slate，$H=36$）
-
-详细协议见 [`docs/pav/03_experiment_protocol.md`](docs/pav/03_experiment_protocol.md)。
+协议：[`03_experiment_protocol.md`](docs/pav/03_experiment_protocol.md)、[`06_v2_ablation_protocol.md`](docs/pav/06_v2_ablation_protocol.md)。
 
 ---
 
-## 消融实验
+## 消融
 
-通过 `PAVConfig` 或 `pav_train.py` 的 `extra_config` 控制：
+通过 `PAVConfig` 或 `pav_train.py` / `pav_cli.py` 控制：
 
-| 配置项 | 默认值 | 消融用途 |
-|--------|--------|----------|
-| `use_verifier` | `True` | 关闭 Verifier，$C_t = p_t^k$ |
-| `use_raw_progress` | `False` | 直接用 progress，不乘 Verifier 分数 |
-| `reward_model_zero` | `False` | $R_\phi \equiv 0$，测试无状态潜力时的 progress |
-| `alpha` | `0.1` | shaping 强度（如 0.05 / 0.2） |
-| `k` | 3 或 5 | progress 视野长度 |
+| 配置项 | 默认 | 用途 |
+|--------|------|------|
+| `directional_lambda` | 0（推荐 0.5） | 0 关闭方向项 |
+| `verifier_label_mode` | `sign`（推荐 `necessity_combined`） | Verifier 标签定义 |
+| `consistency_beta` | 0（推荐 0.1） | 0 跳过 consistency 微调 |
+| `use_verifier` | `True` | 关闭后 C_t = p_t |
+| `use_raw_progress` | `False` | 不乘 V_ψ 分数 |
+| `reward_model_zero` | `False` | R_φ ≡ 0 |
+| `alpha` / `k` | 0.1 / 3 或 5 | shaping 强度与视野 |
+| `suffix` | `pav` | artifact 与 H5 后缀 |
+
+快速消融：`python script/pav_ablation_fast.py`
 
 ```bash
 python pav_train.py shape_dataset "{'env':'SlateRecEnv-v0','use_verifier':False,'suffix':'pav_noverifier'}"
@@ -257,32 +370,24 @@ python batchrl_train.py CQL train "{'env':'SlateRecEnv-v0','use_pav':True,'pav_s
 
 | 文档 | 内容 |
 |------|------|
-| [`01_rl4rs_mdp_formulation.md`](docs/pav/01_rl4rs_mdp_formulation.md) | RL4RS MDP 建模与符号对应 |
-| [`02_progress_and_pav_definition.md`](docs/pav/02_progress_and_pav_definition.md) | PAV 完整数学定义 |
-| [`03_experiment_protocol.md`](docs/pav/03_experiment_protocol.md) | 主实验与消融协议 |
-| [`04_two_month_roadmap.md`](docs/pav/04_two_month_roadmap.md) | 研究路线图 |
+| [`01_rl4rs_mdp_formulation.md`](docs/pav/01_rl4rs_mdp_formulation.md) | MDP 建模 |
+| [`02_progress_and_pav_definition.md`](docs/pav/02_progress_and_pav_definition.md) | 完整数学定义 |
+| [`03_experiment_protocol.md`](docs/pav/03_experiment_protocol.md) | 离线实验协议 |
+| [`online_runbook.md`](docs/pav/online_runbook.md) | 在线 RL + GPU 环境 |
+| [`06_v2_ablation_protocol.md`](docs/pav/06_v2_ablation_protocol.md) | 消融矩阵 |
 
 ---
 
-## 与上游 RL4RS 的关系
+## 与 RL4RS 的关系
 
-本项目是 RL4RS 的**扩展 fork**，保留其全部环境与 baseline 能力：
+Fork 自 [RL4RS](https://github.com/fuxiAIlab/RL4RS)：**保留**全部环境与 offline baseline；**新增** `rl4rs/pav/`、`rl4rs/online/`；**不修改**环境 transition 与 logged 数据生成。
 
-- **保留**：`SlateRecEnv-v0`、`SeqSlateRecEnv-v0`、仿真器训练、CQL/BCQ/BC 等 offline RL pipeline
-- **新增**：`rl4rs/pav/` 子包，在 MDPDataset 层做 verified progress shaping
-- **不修改**：环境 transition、原始 reward 计算、数据生成逻辑
-
-上游资源：
-
-- RL4RS 论文：https://arxiv.org/pdf/2110.11073.pdf
-- 原始仓库：https://github.com/fuxiAIlab/RL4RS
-- Tutorial：https://github.com/fuxiAIlab/RL4RS/blob/main/tutorial.ipynb
+- 论文：https://arxiv.org/pdf/2110.11073.pdf
+- 原仓库：https://github.com/fuxiAIlab/RL4RS
 
 ---
 
 ## Citation
-
-如果使用本仓库，请引用 RL4RS 原文：
 
 ```bibtex
 @article{2021RL4RS,
@@ -300,4 +405,4 @@ PAV 方法论文投稿中，引用信息待更新。
 
 ## License
 
-本项目继承 RL4RS 的 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
