@@ -239,7 +239,7 @@ stats = signals["stats"]
 
 - **保留**：环境、仿真器、CQL/BCQ/BC、RLlib pilot
 - **新增/更新**：`rl4rs/pav/` 冻结 v3、显式 Prover、hybrid MC、prover suite 脚本
-- **移除**：online prover refresh / refit（`online_prover.py`）
+- **移除**：online prover refresh / refit
 
 上游：https://github.com/fuxiAIlab/RL4RS
 
