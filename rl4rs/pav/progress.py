@@ -211,8 +211,20 @@ def normalize_by_step(values, step_ids, eps=1e-6):
     return normalized, stats
 
 
-def shape_rewards(rewards, contribution, step_ids, alpha=0.1, clip_c=3.0, use_clipping=True):
-    normalized, stats = normalize_by_step(contribution, step_ids)
+def shape_rewards(
+    rewards,
+    contribution,
+    step_ids,
+    alpha=0.1,
+    clip_c=3.0,
+    use_clipping=True,
+    normalize_contribution=True,
+):
+    if normalize_contribution:
+        normalized, stats = normalize_by_step(contribution, step_ids)
+    else:
+        normalized = np.asarray(contribution, dtype="float32")
+        stats = {}
     if use_clipping:
         normalized = np.clip(normalized, -clip_c, clip_c)
     shaped = rewards.astype("float32") + alpha * normalized.astype("float32")

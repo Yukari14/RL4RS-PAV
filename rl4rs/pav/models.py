@@ -55,16 +55,58 @@ class RewardModel(nn.Module):
 
 
 class Verifier(nn.Module):
-    def __init__(self, observation_dim, action_size, hidden_units, action_emb_size=32):
+    def __init__(
+        self,
+        observation_dim,
+        action_size,
+        hidden_units,
+        action_emb_size=32,
+        output_mode="binary",
+    ):
         super(Verifier, self).__init__()
+        self.output_mode = str(output_mode)
         self.action_emb = nn.Embedding(action_size, action_emb_size)
-        self.model = MLP(observation_dim + action_emb_size, hidden_units, 1)
+        trunk_layers = []
+        last_dim = observation_dim + action_emb_size
+        for hidden_dim in hidden_units:
+            trunk_layers.append(nn.Linear(last_dim, hidden_dim))
+            trunk_layers.append(nn.ReLU())
+            last_dim = hidden_dim
+        self.trunk = nn.Sequential(*trunk_layers)
+        self.gate_head = (
+            nn.Linear(last_dim, 1) if self.output_mode in ("binary", "dual") else None
+        )
+        self.q_head = (
+            nn.Linear(last_dim, 1) if self.output_mode in ("q_regression", "dual") else None
+        )
+        if self.gate_head is None and self.q_head is None:
+            self.gate_head = nn.Linear(last_dim, 1)
 
-    def forward(self, observations, actions):
+    def _hidden(self, observations, actions):
         actions = actions.long().view(-1)
         action_emb = self.action_emb(actions)
         x = torch.cat([observations, action_emb], dim=-1)
-        return self.model(x).squeeze(-1)
+        return self.trunk(x)
+
+    def forward(self, observations, actions):
+        hidden = self._hidden(observations, actions)
+        if self.output_mode == "q_regression":
+            return self.q_head(hidden).squeeze(-1)
+        if self.output_mode == "dual":
+            return self.gate_head(hidden).squeeze(-1), self.q_head(hidden).squeeze(-1)
+        return self.gate_head(hidden).squeeze(-1)
+
+    def predict_q(self, observations, actions):
+        hidden = self._hidden(observations, actions)
+        if self.q_head is None:
+            raise ValueError("Verifier has no q_head (output_mode={}).".format(self.output_mode))
+        return self.q_head(hidden).squeeze(-1)
+
+    def predict_gate_logits(self, observations, actions):
+        hidden = self._hidden(observations, actions)
+        if self.gate_head is None:
+            raise ValueError("Verifier has no gate_head (output_mode={}).".format(self.output_mode))
+        return self.gate_head(hidden).squeeze(-1)
 
 
 class ZeroRewardModel(object):
@@ -103,9 +145,36 @@ def load_reward_model(path, observation_dim, hidden_units, device, embed_dim=0):
     return model, meta
 
 
-def load_verifier(path, observation_dim, action_size, hidden_units, device):
-    model = Verifier(observation_dim, action_size, hidden_units).to(device)
+def _migrate_legacy_verifier_state(state):
+    if not any(key.startswith("model.") for key in state):
+        return state
+    migrated = {}
+    for key, value in state.items():
+        if key.startswith("action_emb."):
+            migrated[key] = value
+        elif key.startswith("model."):
+            suffix = key[len("model."):]
+            parts = suffix.split(".")
+            layer_idx = int(parts[0])
+            tail = ".".join(parts[1:])
+            if layer_idx >= 4:
+                migrated["gate_head.{}".format(tail)] = value
+            else:
+                migrated["trunk.{}.{}".format(layer_idx, tail)] = value
+    return migrated
+
+
+def load_verifier(path, observation_dim, action_size, hidden_units, device, output_mode="binary"):
     checkpoint = torch.load(path, map_location=device)
-    model.load_state_dict(checkpoint["model"])
+    meta = checkpoint.get("metadata", {})
+    output_mode = meta.get("verifier_output_mode", output_mode)
+    model = Verifier(
+        observation_dim,
+        action_size,
+        hidden_units,
+        output_mode=output_mode,
+    ).to(device)
+    state = _migrate_legacy_verifier_state(checkpoint["model"])
+    model.load_state_dict(state, strict=False)
     model.eval()
-    return model, checkpoint.get("metadata", {})
+    return model, meta

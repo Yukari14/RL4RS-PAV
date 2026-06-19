@@ -28,7 +28,7 @@ from rl4rs.nets.rllib.rllib_mask_model import getMaskActionsModel
 from rl4rs.online.config import default_pav_config, load_gate_thresholds
 from rl4rs.online.pav_cli import add_pav_cli_args, apply_pav_cli_overrides, pav_condition_tag
 from rl4rs.online.env_utils import attach_slate_masks
-from rl4rs.pav.online import PAVRewardWrapper, load_pav_artifacts
+from rl4rs.pav.online import PAVRewardWrapper, load_pav_artifacts, print_pav_online_startup
 from rl4rs.policy.policy_model import policy_model
 from rl4rs.utils.rllib_print import pretty_print
 from rl4rs.utils.rllib_vector_env import MyVectorEnvWrapper
@@ -210,6 +210,8 @@ def main():
             output_dir, dataset_dir, trial_name=args.pav_trial_name, suffix=args.pav_suffix
         )
         pav_config = apply_pav_cli_overrides(pav_config, args)
+        artifacts = load_pav_artifacts(pav_config)
+        print_pav_online_startup(artifacts)
 
     np.random.seed(args.seed)
     tf.compat.v1.set_random_seed(args.seed)

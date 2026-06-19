@@ -40,7 +40,7 @@ def build_dqn_slate_config(output_dir, dataset_dir, batch_size=64, gpu=True):
     return cfg
 
 
-def default_pav_config(output_dir, dataset_dir, trial_name="a_50k_logged", suffix="pav_v2", **overrides):
+def default_pav_config(output_dir, dataset_dir, trial_name="a_50k_logged", suffix="pav_v3", **overrides):
     from rl4rs.pav.config import PAVConfig
 
     payload = {
@@ -53,6 +53,20 @@ def default_pav_config(output_dir, dataset_dir, trial_name="a_50k_logged", suffi
         "consistency_beta": 0.1,
         "use_verifier": True,
         "use_raw_progress": False,
+        "verifier_output_mode": "q_regression",
+        "use_trajectory_q_avg": True,
+        "use_hybrid_mc": True,
+        "max_mc_states": 500,
+        "n_mc": 4,
+        "mc_max_workers": 4,
+        "mc_sim_batch_size": 1,
+        "mc_sim_use_cpu": True,
+        "mc_progress_every": 25,
+        "hybrid_mc_fraction": 0.1,
+        "reward_epochs": 10,
+        "verifier_epochs": 8,
+        "normalize_contribution": False,
+        "reward_target": "q_mu",
         "output_dir": output_dir,
         "dataset_dir": dataset_dir,
     }
